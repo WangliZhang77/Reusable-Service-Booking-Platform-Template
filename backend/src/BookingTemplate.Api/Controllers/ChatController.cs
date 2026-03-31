@@ -8,6 +8,21 @@ namespace BookingTemplate.Api.Controllers;
 [Route("api/chat")]
 public sealed class ChatController(IChatService chatService) : ControllerBase
 {
+    /// <summary>
+    /// Browsers open URLs with GET; chat only supports POST. This avoids a bare 405 when pasting /api/chat in the address bar.
+    /// </summary>
+    [HttpGet]
+    public IActionResult ChatGet()
+    {
+        return Ok(new
+        {
+            error = "This endpoint only accepts POST.",
+            hint = "Send JSON: { \"message\": \"your text\" }. Opening this page in a browser uses GET, which is not allowed for chat.",
+            method = "POST",
+            path = "/api/chat"
+        });
+    }
+
     [HttpPost]
     public async Task<IActionResult> Chat([FromBody] ChatRequestDto request, CancellationToken cancellationToken)
     {
