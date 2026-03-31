@@ -1,5 +1,7 @@
 using BookingTemplate.Application;
 using BookingTemplate.Infrastructure.DependencyInjection;
+using BookingTemplate.Infrastructure.Persistence;
+using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -25,6 +27,17 @@ var app = builder.Build();
 
 if (app.Environment.IsDevelopment())
 {
+    try
+    {
+        using var scope = app.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        await DbInitializer.SeedDemoDataIfEmptyAsync(db);
+    }
+    catch
+    {
+        // 数据库未就绪时仍允许启动（演示种子可稍后重试）
+    }
+
     app.UseSwagger();
     app.UseSwaggerUI();
 }

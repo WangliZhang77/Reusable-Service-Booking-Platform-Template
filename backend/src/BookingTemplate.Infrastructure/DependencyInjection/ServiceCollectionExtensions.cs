@@ -20,7 +20,9 @@ public static class ServiceCollectionExtensions
             options.UseNpgsql(connectionString));
         services.AddScoped<IBookingDataAccess, BookingDataAccess>();
         services.AddHttpClient();
-        services.AddScoped<IChatService, GeminiChatService>();
+        services.AddScoped<BookingChatToolExecutor>();
+        services.AddScoped<GeminiBookingIntentExtractor>();
+        services.AddScoped<IGeminiChatService, GeminiChatService>();
 
         return services;
     }
