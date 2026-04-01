@@ -58,14 +58,12 @@ public sealed class BookingChatToolExecutor(IBookingDataAccess dataAccess, IBook
     {
         if (string.IsNullOrWhiteSpace(serviceName) ||
             string.IsNullOrWhiteSpace(dateText) ||
-            string.IsNullOrWhiteSpace(startTimeText) ||
             string.IsNullOrWhiteSpace(customerName) ||
             string.IsNullOrWhiteSpace(phone) ||
-            string.IsNullOrWhiteSpace(petName) ||
-            string.IsNullOrWhiteSpace(petType))
+            string.IsNullOrWhiteSpace(petName))
         {
             return Task.FromResult(
-                "Missing required fields. Need serviceName, date (YYYY-MM-DD), startTime (HH:mm), customerName, phone, petName, petType.");
+                "Missing required fields. Need serviceName, date (YYYY-MM-DD), customerName, phone, and petName.");
         }
 
         if (!DateOnly.TryParse(dateText, out var bookingDate))
@@ -73,15 +71,10 @@ public sealed class BookingChatToolExecutor(IBookingDataAccess dataAccess, IBook
             return Task.FromResult("Invalid date. Use YYYY-MM-DD.");
         }
 
-        if (!TryParseTime(startTimeText, out var startTime))
-        {
-            return Task.FromResult("Invalid start time. Use HH:mm (24-hour), e.g. 12:00.");
-        }
-
         return CreateBookingCoreAsync(
             serviceName,
             bookingDate,
-            startTime,
+            startTimeText,
             customerName,
             phone,
             petName,
@@ -124,7 +117,7 @@ public sealed class BookingChatToolExecutor(IBookingDataAccess dataAccess, IBook
             return "I could not find that service. Please share the exact service name.";
         }
 
-        return $"{match.Name} costs {match.Price:C} and takes about {match.DurationMinutes} minutes.";
+        return $"{match.Name} costs NZD {match.Price:0.00} and takes about {match.DurationMinutes} minutes.";
     }
 
     private async Task<string> SearchFaqCoreAsync(string query, CancellationToken cancellationToken)
@@ -184,11 +177,11 @@ public sealed class BookingChatToolExecutor(IBookingDataAccess dataAccess, IBook
     private async Task<string> CreateBookingCoreAsync(
         string serviceName,
         DateOnly bookingDate,
-        TimeOnly startTime,
+        string? startTimeText,
         string customerName,
         string phone,
         string petName,
-        string petType,
+        string? petType,
         CancellationToken cancellationToken)
     {
         var services = await dataAccess.GetActiveServicesAsync(cancellationToken);
@@ -196,6 +189,26 @@ public sealed class BookingChatToolExecutor(IBookingDataAccess dataAccess, IBook
         if (match is null)
         {
             return "I could not find that service. Please confirm the service name.";
+        }
+
+        TimeOnly startTime;
+        if (!string.IsNullOrWhiteSpace(startTimeText))
+        {
+            if (!TryParseTime(startTimeText, out startTime))
+            {
+                return "Invalid start time. Use HH:mm (24-hour), e.g. 12:00.";
+            }
+        }
+        else
+        {
+            var availability = await bookingService.GetAvailabilityAsync(match.Id, bookingDate, cancellationToken);
+            var first = availability.Slots.FirstOrDefault(s => s.IsAvailable);
+            if (first is null)
+            {
+                return $"No available slots found for {match.Name} on {bookingDate:yyyy-MM-dd}.";
+            }
+
+            startTime = first.StartTime;
         }
 
         var dto = new CreateBookingRequestDto
@@ -218,7 +231,7 @@ public sealed class BookingChatToolExecutor(IBookingDataAccess dataAccess, IBook
         try
         {
             var created = await bookingService.CreateBookingAsync(dto, cancellationToken);
-            return $"Booking created successfully. Reference id {created.Id}. Service: {created.ServiceName}, date {created.BookingDate:yyyy-MM-dd} at {created.StartTime:HH:mm}, pet {petName}.";
+            return $"Done - your booking is confirmed. Ref: {created.Id}. {created.ServiceName} on {created.BookingDate:yyyy-MM-dd} at {created.StartTime:HH:mm} for {petName}.";
         }
         catch (ArgumentException ex)
         {
@@ -252,9 +265,9 @@ public sealed class BookingChatToolExecutor(IBookingDataAccess dataAccess, IBook
         return false;
     }
 
-    private static string NormalizeSpecies(string petType)
+    private static string NormalizeSpecies(string? petType)
     {
-        var t = petType.Trim();
+        var t = (petType ?? string.Empty).Trim();
         if (t.Length == 0)
         {
             return "Unknown";

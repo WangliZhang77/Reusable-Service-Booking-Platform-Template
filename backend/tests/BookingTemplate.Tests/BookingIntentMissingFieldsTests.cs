@@ -11,13 +11,9 @@ public sealed class BookingIntentMissingFieldsTests
     {
         var dto = new BookingIntentExtractionDto { Intent = "booking" };
         var missing = BookingIntentMissingFields.Compute(dto);
-        Assert.Contains("serviceName", missing);
-        Assert.Contains("date", missing);
-        Assert.Contains("startTime", missing);
-        Assert.Contains("customerName", missing);
-        Assert.Contains("phone", missing);
-        Assert.Contains("petName", missing);
-        Assert.Contains("petType", missing);
+        Assert.Equal(
+            ["serviceName", "date", "customerName", "phone", "petName"],
+            missing);
     }
 
     [Fact]

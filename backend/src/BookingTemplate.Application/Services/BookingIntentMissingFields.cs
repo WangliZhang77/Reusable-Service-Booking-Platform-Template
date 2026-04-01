@@ -38,11 +38,6 @@ public static class BookingIntentMissingFields
                     list.Add("date");
                 }
 
-                if (string.IsNullOrWhiteSpace(x.StartTime))
-                {
-                    list.Add("startTime");
-                }
-
                 if (string.IsNullOrWhiteSpace(x.CustomerName))
                 {
                     list.Add("customerName");
@@ -56,11 +51,6 @@ public static class BookingIntentMissingFields
                 if (string.IsNullOrWhiteSpace(x.PetName))
                 {
                     list.Add("petName");
-                }
-
-                if (string.IsNullOrWhiteSpace(x.PetType))
-                {
-                    list.Add("petType");
                 }
 
                 break;

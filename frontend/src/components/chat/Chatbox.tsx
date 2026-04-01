@@ -11,6 +11,20 @@ function Chatbox() {
   const [open, setOpen] = useState(false)
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
+  const [sessionId] = useState(() => {
+    const key = 'chat_session_id'
+    const existing = localStorage.getItem(key)
+    if (existing) return existing
+
+    // Use crypto.randomUUID when available; fall back to a simple id.
+    const id =
+      typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : `sess-${Date.now()}-${Math.random().toString(16).slice(2)}`
+
+    localStorage.setItem(key, id)
+    return id
+  })
   const [messages, setMessages] = useState<ChatMessage[]>([
     { role: 'assistant', text: 'Hi! Ask me about FAQ, pricing, availability, or booking.' },
   ])
@@ -25,7 +39,7 @@ function Chatbox() {
     setSending(true)
 
     try {
-      const response = await sendChatMessage({ message: content })
+      const response = await sendChatMessage({ message: content, sessionId })
       setMessages((prev) => [...prev, { role: 'assistant', text: response.reply }])
     } catch (error) {
       const text = error instanceof Error ? error.message : 'Chat request failed.'

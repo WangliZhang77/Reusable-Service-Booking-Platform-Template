@@ -77,6 +77,7 @@ export interface FaqItem {
 
 export interface ChatRequestPayload {
   message: string
+  sessionId?: string
 }
 
 export interface ChatResponsePayload {

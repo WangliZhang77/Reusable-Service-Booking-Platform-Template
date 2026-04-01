@@ -1,4 +1,6 @@
 using System.Text.Json;
+using System.Collections.Concurrent;
+using System.Text.RegularExpressions;
 using BookingTemplate.Application.DTOs.Chat;
 using BookingTemplate.Application.Interfaces.Services;
 using BookingTemplate.Application.Services;
@@ -14,9 +16,33 @@ public sealed class GeminiChatService(
     IConfiguration configuration) : IGeminiChatService
 {
     private const int MaxToolRounds = 8;
+    private static readonly ConcurrentDictionary<string, AvailabilityContext> AvailabilityStates = new(StringComparer.Ordinal);
+    private static readonly Regex SlotInputRegex = new(@"^\s*(\d{1,2}:\d{2})(\s*-\s*\d{1,2}:\d{2})?\s*,?\s*$", RegexOptions.Compiled);
 
-    public async Task<ChatResponseDto?> ReplyWithGeminiAndToolsAsync(string message, CancellationToken cancellationToken)
+    public async Task<ChatResponseDto?> ReplyWithGeminiAndToolsAsync(string message, string? sessionId, CancellationToken cancellationToken)
     {
+        var sessionKey = string.IsNullOrWhiteSpace(sessionId) ? "default" : sessionId.Trim();
+
+        if (TryParseConfirmation(message, out var pending))
+        {
+            AvailabilityStates.TryRemove(sessionKey, out _);
+            var bookText = await toolExecutor.CreateBookingAsync(
+                pending.ServiceName,
+                pending.Date,
+                pending.StartTime,
+                pending.CustomerName,
+                pending.Phone,
+                pending.PetName,
+                pending.PetType,
+                cancellationToken);
+            return new ChatResponseDto(bookText, "booking");
+        }
+
+        if (TryHandleSlotFollowUp(message, sessionKey, out var followUpReply))
+        {
+            return followUpReply;
+        }
+
         var apiKey = ResolveApiKey();
         if (string.IsNullOrWhiteSpace(apiKey))
         {
@@ -41,7 +67,7 @@ public sealed class GeminiChatService(
 
                 if (missing.Count > 0 && intentNorm is "booking" or "availability" or "price" or "faq")
                 {
-                    return new ChatResponseDto(FormatFollowUp(missing), intentNorm);
+                    return new ChatResponseDto(FormatFollowUp(intentNorm, missing), intentNorm);
                 }
 
                 if (intentNorm == "availability" && missing.Count == 0)
@@ -50,21 +76,22 @@ public sealed class GeminiChatService(
                         extracted.ServiceName,
                         extracted.Date,
                         cancellationToken);
+                    AvailabilityStates[sessionKey] = new AvailabilityContext(extracted.ServiceName!, extracted.Date!);
                     return new ChatResponseDto(slotText, "availability");
                 }
 
                 if (intentNorm == "booking" && missing.Count == 0)
                 {
-                    var bookText = await toolExecutor.CreateBookingAsync(
-                        extracted.ServiceName,
-                        extracted.Date,
-                        extracted.StartTime,
-                        extracted.CustomerName,
-                        extracted.Phone,
-                        extracted.PetName,
-                        extracted.PetType,
-                        cancellationToken);
-                    return new ChatResponseDto(bookText, "booking");
+                    return new ChatResponseDto(
+                        BuildBookingConfirmationPrompt(new PendingBooking(
+                            extracted.ServiceName!,
+                            extracted.Date!,
+                            extracted.StartTime,
+                            extracted.CustomerName!,
+                            extracted.Phone!,
+                            extracted.PetName!,
+                            extracted.PetType)),
+                        "booking_confirmation");
                 }
 
                 if (intentNorm == "price" && missing.Count == 0)
@@ -81,6 +108,43 @@ public sealed class GeminiChatService(
             }
 
             return await RunFunctionCallingLoopAsync(model, message, apiKey, cancellationToken);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    public async Task<string?> ReplyWithGeminiTextAsync(string systemInstruction, string userMessage, CancellationToken cancellationToken)
+    {
+        var apiKey = ResolveApiKey();
+        if (string.IsNullOrWhiteSpace(apiKey))
+        {
+            return null;
+        }
+
+        var model = configuration["Gemini:Model"] ?? "gemini-2.5-flash";
+        try
+        {
+            var client = new Client(apiKey: apiKey);
+            var config = new GenerateContentConfig
+            {
+                SystemInstruction = new Content
+                {
+                    Parts = [Part.FromText(systemInstruction)]
+                }
+            };
+
+            var response = await client.Models.GenerateContentAsync(
+                model: model,
+                contents: userMessage,
+                config: config,
+                cancellationToken: cancellationToken);
+
+            var text = response.Candidates?.FirstOrDefault()?.Content?.Parts?
+                .Select(p => p.Text)
+                .FirstOrDefault(t => !string.IsNullOrWhiteSpace(t));
+            return string.IsNullOrWhiteSpace(text) ? null : text.Trim();
         }
         catch
         {
@@ -202,25 +266,51 @@ public sealed class GeminiChatService(
         }
     }
 
-    private static string FormatFollowUp(IReadOnlyList<string> missing)
+    private static string FormatFollowUp(string intent, IReadOnlyList<string> missing)
     {
+        static int SortKey(string key) => key switch
+        {
+            "serviceName" => 1,
+            "date" => 2,
+            "startTime" => 3,
+            "customerName" => 4,
+            "phone" => 5,
+            "petName" => 6,
+            "petType" => 7,
+            "faqQuery" => 8,
+            _ => 100
+        };
+
         static string Label(string key) => key switch
         {
-            "serviceName" => "service name (服务名称)",
-            "date" => "date YYYY-MM-DD (日期)",
-            "startTime" => "start time HH:mm (开始时间)",
-            "customerName" => "your name (姓名)",
-            "phone" => "phone (电话)",
-            "petName" => "pet name (宠物名)",
-            "petType" => "pet type e.g. dog/cat (宠物类型)",
-            "faqQuery" => "what you want to ask (具体问题)",
+            "serviceName" => "service name",
+            "date" => "date (YYYY-MM-DD)",
+            "startTime" => "start time (HH:mm, 24-hour)",
+            "customerName" => "your name",
+            "phone" => "phone number",
+            "petName" => "pet name",
+            "petType" => "pet type (e.g. dog/cat)",
+            "faqQuery" => "what you want to ask",
             _ => key
         };
 
-        var parts = missing.Select(Label).ToList();
-        return "I still need a bit more information:\n• " +
+        var sorted = missing.Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(SortKey)
+            .ToList();
+        var parts = sorted.Select(Label).ToList();
+        var example = intent switch
+        {
+            "booking" => "Example: Full Groom, 2026-04-01, Wang Li, 0211234567, Coco",
+            "availability" => "Example: Full Groom, 2026-04-01",
+            "price" => "Example: Full Groom",
+            "faq" => "Example: Do you groom senior cats?",
+            _ => string.Empty
+        };
+
+        return "I can take care of that. I just need a couple more details:\n• " +
                string.Join("\n• ", parts) +
-               "\nPlease reply with these details.";
+               "\nSend them in one message and I will handle the rest." +
+               (string.IsNullOrWhiteSpace(example) ? string.Empty : $"\n{example}");
     }
 
     private string? ResolveApiKey()
@@ -318,4 +408,90 @@ public sealed class GeminiChatService(
 
     private static object ParseSchema(string json) =>
         JsonSerializer.Deserialize<object>(json) ?? new { };
+
+    private static string BuildBookingConfirmationPrompt(PendingBooking pending)
+    {
+        var token = Convert.ToBase64String(JsonSerializer.SerializeToUtf8Bytes(pending));
+        return $"I have prepared your booking details:\n" +
+               $"Service: {pending.ServiceName}\n" +
+               $"Date: {pending.Date}\n" +
+               $"Time: {(string.IsNullOrWhiteSpace(pending.StartTime) ? "We will assign the nearest available slot." : pending.StartTime)}\n" +
+               $"Pet: {pending.PetName}{(string.IsNullOrWhiteSpace(pending.PetType) ? string.Empty : $" ({pending.PetType})")}\n" +
+               $"Customer: {pending.CustomerName}\n" +
+               $"Phone: {pending.Phone}\n\n" +
+               "If everything looks good, reply exactly:\n" +
+               $"Yes, confirm {token}";
+    }
+
+    private static bool TryParseConfirmation(string message, out PendingBooking pending)
+    {
+        pending = default!;
+        var prefix = "yes, confirm ";
+        if (!message.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var token = message[prefix.Length..].Trim();
+        if (string.IsNullOrWhiteSpace(token))
+        {
+            return false;
+        }
+
+        try
+        {
+            var json = Convert.FromBase64String(token);
+            var parsed = JsonSerializer.Deserialize<PendingBooking>(json);
+            if (parsed is null ||
+                string.IsNullOrWhiteSpace(parsed.ServiceName) ||
+                string.IsNullOrWhiteSpace(parsed.Date) ||
+                string.IsNullOrWhiteSpace(parsed.CustomerName) ||
+                string.IsNullOrWhiteSpace(parsed.Phone) ||
+                string.IsNullOrWhiteSpace(parsed.PetName))
+            {
+                return false;
+            }
+
+            pending = parsed;
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private sealed record PendingBooking(
+        string ServiceName,
+        string Date,
+        string? StartTime,
+        string CustomerName,
+        string Phone,
+        string PetName,
+        string? PetType);
+
+    private static bool TryHandleSlotFollowUp(string message, string sessionKey, out ChatResponseDto reply)
+    {
+        reply = default!;
+        var match = SlotInputRegex.Match(message);
+        if (!match.Success)
+        {
+            return false;
+        }
+
+        if (!AvailabilityStates.TryGetValue(sessionKey, out var state))
+        {
+            reply = new ChatResponseDto("What service and date are you interested in for this slot?", "availability");
+            return true;
+        }
+
+        var start = match.Groups[1].Value;
+        reply = new ChatResponseDto(
+            $"Great, I can book {state.ServiceName} on {state.Date} at {start}. " +
+            "Please send your details in one message: your name, phone number, pet name, and pet type (dog/cat).",
+            "booking");
+        return true;
+    }
+
+    private sealed record AvailabilityContext(string ServiceName, string Date);
 }

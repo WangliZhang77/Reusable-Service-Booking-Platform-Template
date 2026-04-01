@@ -5,21 +5,26 @@ using Microsoft.AspNetCore.Mvc;
 namespace BookingTemplate.Api.Controllers;
 
 /// <summary>
-/// 最小连通性测试：不经过 booking / function calling，仅验证 GEMINI_API_KEY 与 Google.GenAI SDK。
+/// 最小连通性测试：不经过 booking / function calling，仅验证 API Key 与 Google.GenAI SDK。
+/// Key 来源：Gemini:ApiKey（含 User Secrets / appsettings）或环境变量 GEMINI_API_KEY。
 /// </summary>
 [ApiController]
 [Route("api/test-gemini")]
-public sealed class TestGeminiController : ControllerBase
+public sealed class TestGeminiController(IConfiguration configuration) : ControllerBase
 {
     private const string ModelId = "gemini-3-flash-preview";
 
     [HttpGet]
     public async Task<IActionResult> Get(CancellationToken cancellationToken)
     {
-        var apiKey = System.Environment.GetEnvironmentVariable("GEMINI_API_KEY");
+        var apiKey = ResolveApiKey();
         if (string.IsNullOrWhiteSpace(apiKey))
         {
-            return BadRequest(new { ok = false, error = "GEMINI_API_KEY is missing" });
+            return BadRequest(new
+            {
+                ok = false,
+                error = "No API key. Set Gemini:ApiKey (User Secrets) or environment variable GEMINI_API_KEY."
+            });
         }
 
         try
@@ -54,5 +59,16 @@ public sealed class TestGeminiController : ControllerBase
         }
 
         return parts[0].Text;
+    }
+
+    private string? ResolveApiKey()
+    {
+        var fromConfig = configuration["Gemini:ApiKey"];
+        if (!string.IsNullOrWhiteSpace(fromConfig))
+        {
+            return fromConfig.Trim();
+        }
+
+        return System.Environment.GetEnvironmentVariable("GEMINI_API_KEY");
     }
 }

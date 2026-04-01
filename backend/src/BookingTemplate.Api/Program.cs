@@ -1,9 +1,13 @@
+using System.Reflection;
 using BookingTemplate.Application;
 using BookingTemplate.Infrastructure.DependencyInjection;
 using BookingTemplate.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// 显式加载 User Secrets（与 csproj 中 UserSecretsId 对应），避免仅依赖默认 Development 行为导致 Gemini:ApiKey 读不到
+builder.Configuration.AddUserSecrets(Assembly.GetExecutingAssembly());
 
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
@@ -31,6 +35,7 @@ if (app.Environment.IsDevelopment())
     {
         using var scope = app.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        await db.Database.MigrateAsync();
         await DbInitializer.SeedDemoDataIfEmptyAsync(db);
     }
     catch
@@ -49,3 +54,5 @@ app.MapControllers();
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 
 app.Run();
+
+public partial class Program { }

@@ -7,5 +7,6 @@ namespace BookingTemplate.Application.Interfaces.Services;
 /// </summary>
 public interface IGeminiChatService
 {
-    Task<ChatResponseDto?> ReplyWithGeminiAndToolsAsync(string message, CancellationToken cancellationToken);
+    Task<ChatResponseDto?> ReplyWithGeminiAndToolsAsync(string message, string? sessionId, CancellationToken cancellationToken);
+    Task<string?> ReplyWithGeminiTextAsync(string systemInstruction, string userMessage, CancellationToken cancellationToken);
 }
