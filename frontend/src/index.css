@@ -588,7 +588,6 @@ h3 {
   border-radius: 10px;
   border: 1px solid var(--border);
   font-size: 0.92rem;
-  white-space: pre-wrap;
 }
 
 .chat-message.user {
@@ -599,6 +598,28 @@ h3 {
 
 .chat-message.assistant {
   background: #fff;
+}
+
+.chat-message-body {
+  white-space: pre-wrap;
+}
+
+.chatbox-confirm-btn {
+  margin-top: 0.45rem;
+  width: 100%;
+  font-size: 0.88rem;
+  padding: 0.4rem 0.55rem;
+}
+
+.chatbox-pending-hint {
+  margin: 0;
+  padding: 0.45rem 0.55rem;
+  font-size: 0.82rem;
+  line-height: 1.35;
+  color: var(--text-muted, #5a6560);
+  background: #f4faf8;
+  border: 1px solid var(--border);
+  border-radius: 8px;
 }
 
 .chatbox-input {

@@ -18,6 +18,9 @@ public sealed class GeminiChatService(
     private const int MaxToolRounds = 8;
     private static readonly ConcurrentDictionary<string, AvailabilityContext> AvailabilityStates = new(StringComparer.Ordinal);
     private static readonly Regex SlotInputRegex = new(@"^\s*(\d{1,2}:\d{2})(\s*-\s*\d{1,2}:\d{2})?\s*,?\s*$", RegexOptions.Compiled);
+    private static readonly Regex BookingConfirmationRegex = new(
+        @"yes, confirm\s+([A-Za-z0-9+/=]+)",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     public async Task<ChatResponseDto?> ReplyWithGeminiAndToolsAsync(string message, string? sessionId, CancellationToken cancellationToken)
     {
@@ -426,13 +429,13 @@ public sealed class GeminiChatService(
     private static bool TryParseConfirmation(string message, out PendingBooking pending)
     {
         pending = default!;
-        var prefix = "yes, confirm ";
-        if (!message.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+        var match = BookingConfirmationRegex.Match(message.Trim());
+        if (!match.Success)
         {
             return false;
         }
 
-        var token = message[prefix.Length..].Trim();
+        var token = match.Groups[1].Value.Trim();
         if (string.IsNullOrWhiteSpace(token))
         {
             return false;

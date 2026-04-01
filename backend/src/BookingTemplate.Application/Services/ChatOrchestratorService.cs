@@ -39,6 +39,9 @@ public sealed class ChatOrchestratorService(
     private static readonly Regex PetCalledNameRegex = new(@"(?:pet|dog|cat)\s+(?:is\s+)?called\s+([a-z0-9][a-z0-9\s'\-]{0,30})", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex SimpleNameRegex = new(@"^[a-z][a-z\s'\-]{1,40}$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex AnyClockRegex = new(@"\b\d{1,2}:\d{2}\b", RegexOptions.Compiled);
+    private static readonly Regex BookingConfirmationRegex = new(
+        @"yes, confirm\s+([A-Za-z0-9+/=]+)",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly HashSet<string> FaqWeakTerms = new(StringComparer.OrdinalIgnoreCase)
     {
         "dog", "dogs", "cat", "cats", "pet", "pets"
@@ -214,6 +217,11 @@ public sealed class ChatOrchestratorService(
             var prioritized = await geminiChat.ReplyWithGeminiAndToolsAsync(message, sessionId, cancellationToken);
             if (!string.IsNullOrWhiteSpace(prioritized?.Reply))
             {
+                if (IsConfirmationMessage(normalized))
+                {
+                    BookingDrafts.TryRemove(sessionKey, out _);
+                }
+
                 memory.LastIntent = prioritized!.Intent;
                 return prioritized!;
             }
@@ -561,7 +569,8 @@ public sealed class ChatOrchestratorService(
     }
 
     private static bool IsConfirmationMessage(string normalizedLower) =>
-        normalizedLower.StartsWith("yes, confirm ", StringComparison.OrdinalIgnoreCase);
+        normalizedLower.TrimStart().StartsWith("yes, confirm ", StringComparison.OrdinalIgnoreCase)
+        || BookingConfirmationRegex.IsMatch(normalizedLower);
 
     private static bool IsAvailabilityIntent(string normalizedLower) =>
         normalizedLower.Contains("availability")
@@ -800,6 +809,13 @@ public sealed class ChatOrchestratorService(
 
     private static bool IsComparisonQuestion(string normalized) =>
         normalized.Contains("difference")
+        || normalized.Contains("different between")
+        || normalized.Contains("what is different")
+        || normalized.Contains("what's different")
+        || normalized.Contains("whats different")
+        || normalized.Contains("how are they different")
+        || normalized.Contains("how do they differ")
+        || (normalized.Contains("different") && normalized.Contains("between") && (normalized.Contains("them") || normalized.Contains("these") || normalized.Contains("those")))
         || normalized.Contains("compare")
         || normalized.Contains(" vs ")
         || normalized.Contains("better than");
@@ -938,6 +954,11 @@ public sealed class ChatOrchestratorService(
                 "browsing");
         }
 
+        if (IsConfirmationMessage(normalized))
+        {
+            return null;
+        }
+
         if (!hasDraft && intent is not ("booking" or "availability") && !LooksLikeBookingFragment(normalized))
         {
             return null;
@@ -978,6 +999,7 @@ public sealed class ChatOrchestratorService(
             string.Equals(draft.Mode, "booking", StringComparison.OrdinalIgnoreCase) &&
             intent is not ("booking" or "availability") &&
             IsConversationSwitch(normalized) &&
+            !IsComparisonQuestion(normalized) &&
             matched is null)
         {
             BookingDrafts.TryRemove(sessionKey, out _);

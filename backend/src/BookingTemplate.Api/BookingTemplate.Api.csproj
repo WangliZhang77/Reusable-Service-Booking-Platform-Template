@@ -4,6 +4,8 @@
     <TargetFramework>net8.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <!-- Pure REST API: no wwwroot / RCL static assets. Skips Static Web Assets cache (avoids file lock when API is running). -->
+    <StaticWebAssetsEnabled>false</StaticWebAssetsEnabled>
     <!-- User Secrets：本机 dotnet user-secrets set "Gemini:ApiKey" "..."，密钥不会进 Git -->
     <UserSecretsId>booking-template-api-dev</UserSecretsId>
   </PropertyGroup>
