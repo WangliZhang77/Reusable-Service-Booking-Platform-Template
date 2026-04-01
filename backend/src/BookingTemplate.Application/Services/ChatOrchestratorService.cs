@@ -29,13 +29,16 @@ public sealed class ChatOrchestratorService(
     private static readonly Regex DateRegex = new(@"\b\d{4}-\d{2}-\d{2}\b", RegexOptions.Compiled);
     /// <summary>2026/4/2, 2026-04-2, 2026.04.02</summary>
     private static readonly Regex SlashOrDotDateRegex = new(@"\b(\d{4})[/.-](\d{1,2})[/.-](\d{1,2})\b", RegexOptions.Compiled);
+    /// <summary>26/04/02 → 2026-04-02（两位年份补 2000+）。</summary>
+    private static readonly Regex TwoDigitYearDateRegex = new(@"\b(\d{2})[/.-](\d{1,2})[/.-](\d{1,2})\b", RegexOptions.Compiled);
     private static readonly Regex TimeRegex = new(@"\b([01]?\d|2[0-3])(?::([0-5]\d))?\b", RegexOptions.Compiled);
     private static readonly Regex NameRegex = new(@"(?:my\s*name|myname)\s+is\s+([a-z][a-z\s'\-]{1,40})", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex LooseNameRegex = new(@"(?:name is|i am|this is)\s+([a-z][a-z\s'\-]{1,40})", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex PhoneRegex = new(@"\b(?:\+?\d[\d\-\s]{6,16}\d)\b", RegexOptions.Compiled);
     private static readonly Regex PetNameRegex = new(@"(?:pet name is|pet is|dog is|cat is)\s+([a-z0-9][a-z0-9\s'\-]{0,30})", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex DogCatNameRegex = new(@"(?:dog|cat)\s+name\s+([a-z0-9][a-z0-9\s'\-]{0,30})", RegexOptions.IgnoreCase | RegexOptions.Compiled);
-    private static readonly Regex PetPlainNameRegex = new(@"pet\s+([a-z0-9][a-z0-9\s'\-]{0,30})", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    /// <summary>Matches "pet Fluffy" but not "pet name is …" (that is handled by <see cref="PetNameRegex"/>).</summary>
+    private static readonly Regex PetPlainNameRegex = new(@"pet\s+(?!name\b)([a-z0-9][a-z0-9\s'\-]{0,30})", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex PetCalledNameRegex = new(@"(?:pet|dog|cat)\s+(?:is\s+)?called\s+([a-z0-9][a-z0-9\s'\-]{0,30})", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex SimpleNameRegex = new(@"^[a-z][a-z\s'\-]{1,40}$", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     private static readonly Regex AnyClockRegex = new(@"\b\d{1,2}:\d{2}\b", RegexOptions.Compiled);
@@ -86,19 +89,19 @@ public sealed class ChatOrchestratorService(
         {
             throw new ArgumentException("Message is required.");
         }
-        if (IsGreeting(message))
-        {
-            return new ChatResponseDto(
-                "Hi! I can help with FAQ, pricing, availability, and booking.",
-                "greeting");
-        }
-
         var intent = DetectIntent(message);
         var normalized = message.ToLowerInvariant();
         var sessionId = request.SessionId;
         var sessionKey = string.IsNullOrWhiteSpace(sessionId) ? "default" : sessionId.Trim();
         var memory = Memories.GetOrAdd(sessionKey, _ => new ConversationMemory());
         var hasDraft = BookingDrafts.TryGetValue(sessionKey, out var draft);
+
+        var conversational = TryReplyConversationalCue(normalized, intent);
+        if (conversational is not null)
+        {
+            memory.LastIntent = conversational.Intent;
+            return conversational;
+        }
         if (message.All(ch => !char.IsLetterOrDigit(ch)))
         {
             return new ChatResponseDto(
@@ -111,14 +114,23 @@ public sealed class ChatOrchestratorService(
         if (normalized.Contains("how does booking work") || normalized.Contains("what do i need to prepare"))
         {
             return new ChatResponseDto(
-                "Booking is simple: choose a service and date, then share your name, phone, and pet name. I always send a confirmation step before finalizing.",
+                "Booking is straightforward: choose a service and date, then share your name, phone, and pet name. I always show you a summary first — nothing is final until you confirm, so you can fix details anytime before that.",
                 "faq");
         }
 
-        if (normalized.Contains("what can you do"))
+        if (normalized.Contains("what can you do") || normalized.Contains("what do you do") ||
+            normalized.Contains("how does this work") || normalized.Contains("how do i use this") ||
+            normalized.Contains("i need help") || normalized.Contains("help me") ||
+            normalized.Contains("where do i start") || normalized.Contains("not sure where to start") ||
+            normalized.Contains("im lost") || normalized.Contains("i'm lost"))
         {
             return new ChatResponseDto(
-                "I can help you with service recommendations, pricing, availability checks, and booking confirmation. I can also explain grooming steps and suggest gentler options for nervous pets.",
+                "Here is how I can help, in plain language:\n\n" +
+                "• **Pick a service** — tell me about your pet and I will suggest Full Groom vs Bath & Tidy, or say **menu** for the full list\n" +
+                "• **Prices & time** — ask \"how much is Full Groom?\" anytime\n" +
+                "• **Availability** — share a service and a date (for example tomorrow or 2026-04-15)\n" +
+                "• **Book** — once we have the basics, I will show a summary and you confirm in one tap\n\n" +
+                "Nervous or first-time pet? Tell me — I will factor that into the recommendation.",
                 "capabilities");
         }
 
@@ -162,6 +174,30 @@ public sealed class ChatOrchestratorService(
             if (lastServicePrice is not null)
             {
                 return lastServicePrice;
+            }
+        }
+
+        // Booking / availability before service "consultation" so phrases like "book Wash & Tidy" are not eaten by heuristics.
+        if (intent is "booking" or "availability")
+        {
+            var priorityBooking = await TryHandleLocalBookingFlowAsync(message, normalized, intent, sessionKey, memory, cancellationToken);
+            if (priorityBooking is not null)
+            {
+                memory.LastIntent = priorityBooking.Intent;
+                return priorityBooking;
+            }
+        }
+
+        // After we recommended a service, a short "yes" should start the booking flow.
+        if (IsShortBookingAffirmation(normalized) && !string.IsNullOrWhiteSpace(memory.LastServiceName))
+        {
+            var affirmed = $"I want to book {memory.LastServiceName} for my pet";
+            var affirmedNorm = affirmed.ToLowerInvariant();
+            var affirmedReply = await TryHandleLocalBookingFlowAsync(affirmed, affirmedNorm, "booking", sessionKey, memory, cancellationToken);
+            if (affirmedReply is not null)
+            {
+                memory.LastIntent = affirmedReply.Intent;
+                return affirmedReply;
             }
         }
 
@@ -249,7 +285,12 @@ public sealed class ChatOrchestratorService(
         }
 
         return new ChatResponseDto(
-            "I could not find a direct answer yet. Please check our FAQ page or contact us for help.",
+            "I want to make sure you get the right help.\n\n" +
+            "You can try:\n" +
+            "• Say **services** or **menu** to see grooming options and prices\n" +
+            "• Tell me your pet (dog/cat), preferred date, and that you want to **book** — I will walk you through it\n" +
+            "• Ask a specific question (hours, cancellations, nervous pets, etc.) and I will match it to our FAQ\n\n" +
+            "If something still does not feel right, our team is happy to help on the phone or email from the Contact page.",
             "fallback");
     }
 
@@ -302,12 +343,16 @@ public sealed class ChatOrchestratorService(
             .FirstOrDefault();
 
         // Threshold keeps weak/noisy matches from hijacking normal flow.
-        if (best is null || best.score < 5)
+        if (best is null || best.score < 4)
         {
             return null;
         }
 
-        return new ChatResponseDto(best.faq.Answer, intent == "general" ? "faq" : intent);
+        var answer = best.score < 6
+            ? "This might be what you are looking for — let me know if you need more detail:\n\n" + best.faq.Answer
+            : best.faq.Answer;
+
+        return new ChatResponseDto(answer, intent == "general" ? "faq" : intent);
     }
 
     private async Task<ChatResponseDto?> TryAnswerFromServiceAsync(string message, string intent, ConversationMemory memory, CancellationToken cancellationToken)
@@ -345,7 +390,10 @@ public sealed class ChatOrchestratorService(
                 return new ChatResponseDto("No active services are available right now.", "service_menu");
             }
 
-            return new ChatResponseDto("Here is our service menu:\n" + string.Join("\n", menu), "service_menu");
+            return new ChatResponseDto(
+                "Here is what we offer right now — prices and typical duration:\n" + string.Join("\n", menu) +
+                "\n\nTell me your pet and what you are hoping for (quick refresh vs full groom), and I can point you to the best fit.",
+                "service_menu");
         }
 
         var matched = MatchService(services, normalized);
@@ -398,12 +446,26 @@ public sealed class ChatOrchestratorService(
             return "price";
         }
 
-        if (normalized.Contains("book") || normalized.Contains("booking") || normalized.Contains("reserve") || normalized.Contains("appointment") || normalized.Contains("预约") || normalized.Contains("预定"))
+        if (normalized.Contains("book") || normalized.Contains("booking") || normalized.Contains("reserve") ||
+            normalized.Contains("appointment") || normalized.Contains("schedule") || normalized.Contains("make a reservation") ||
+            normalized.Contains("预约") || normalized.Contains("预定") || normalized.Contains("订位"))
         {
             return "booking";
         }
 
-        if (normalized.Contains("faq") || normalized.Contains("question") || normalized.Contains("常见问题"))
+        // "I wanna Wash & Tidy" has no "book" but is clearly choosing a bookable service.
+        if (normalized.Contains("wanna") || normalized.Contains("want to"))
+        {
+            if (normalized.Contains("tidy") || normalized.Contains("groom") || normalized.Contains("full groom") ||
+                normalized.Contains("wash &") || normalized.Contains("bath &") || normalized.Contains("wash&tidy") ||
+                normalized.Contains("bath&tidy"))
+            {
+                return "booking";
+            }
+        }
+
+        if (normalized.Contains("faq") || normalized.Contains("question") || normalized.Contains("常见问题") ||
+            normalized.Contains("policy") || normalized.Contains("policies"))
         {
             return "faq";
         }
@@ -446,8 +508,32 @@ public sealed class ChatOrchestratorService(
     /// <summary>
     /// 先按库里的英文名包含匹配，再用常见说法/中文别名匹配（如「洗狗」→ Bath &amp; Tidy）。
     /// </summary>
+    private static string FoldAlnum(string s) =>
+        string.Concat(s.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant));
+
     private static Service? MatchService(IReadOnlyList<Service> services, string normalizedLower)
     {
+        var msgFold = FoldAlnum(normalizedLower);
+
+        foreach (var svc in services.OrderByDescending(x => FoldAlnum(x.Name).Length))
+        {
+            var key = FoldAlnum(svc.Name);
+            if (key.Length < 3)
+            {
+                continue;
+            }
+
+            if (msgFold.Contains(key, StringComparison.Ordinal))
+            {
+                return svc;
+            }
+
+            if (msgFold.Length >= 6 && key.Contains(msgFold, StringComparison.Ordinal))
+            {
+                return svc;
+            }
+        }
+
         var byName = services.FirstOrDefault(x => normalizedLower.Contains(x.Name.ToLowerInvariant()));
         if (byName is not null)
         {
@@ -462,7 +548,10 @@ public sealed class ChatOrchestratorService(
             ),
             (
                 "Bath & Tidy",
-                ["bath & tidy", "bath and tidy", "bath tidy", "洗狗", "洗澡", "wash and tidy"]
+                [
+                    "wash & tidy", "wash and tidy", "wash tidy", "wash&tidy", "washtidy",
+                    "bath&tidy", "bathtidy", "bath & tidy", "bath and tidy", "bath tidy", "洗狗", "洗澡", "wash and tidy"
+                ]
             )
         };
 
@@ -470,7 +559,13 @@ public sealed class ChatOrchestratorService(
         {
             foreach (var phrase in phrases.OrderByDescending(p => p.Length))
             {
-                if (normalizedLower.Contains(phrase.ToLowerInvariant()))
+                var phraseFold = FoldAlnum(phrase);
+                if (phraseFold.Length >= 4 && msgFold.Contains(phraseFold, StringComparison.Ordinal))
+                {
+                    return services.FirstOrDefault(s => s.Name.Equals(serviceName, StringComparison.OrdinalIgnoreCase));
+                }
+
+                if (normalizedLower.Contains(phrase, StringComparison.OrdinalIgnoreCase))
                 {
                     return services.FirstOrDefault(s => s.Name.Equals(serviceName, StringComparison.OrdinalIgnoreCase));
                 }
@@ -590,10 +685,111 @@ public sealed class ChatOrchestratorService(
         || (normalizedLower.Contains("明天") && (normalizedLower.Contains("洗") || normalizedLower.Contains("wash") || normalizedLower.Contains("dog")))
         || normalizedLower.Contains("有空");
 
-    private static bool IsGreeting(string message)
+    /// <summary>Thanks, goodbye, small talk, short greetings — only when intent is not already business-focused.</summary>
+    private static ChatResponseDto? TryReplyConversationalCue(string normalized, string intent)
     {
-        var x = message.Trim().ToLowerInvariant();
-        return x is "hi" or "hello" or "hey" or "good morning" or "good afternoon" or "good evening";
+        if (intent is "booking" or "availability" or "price" or "faq")
+        {
+            return null;
+        }
+
+        if (IsThanksMessage(normalized))
+        {
+            var flip = normalized.Length % 2 == 0;
+            return flip
+                ? new ChatResponseDto(
+                    "You are so welcome — glad I could help. Whenever you are ready to book or check a date, just say the word.",
+                    "social")
+                : new ChatResponseDto(
+                    "Happy to help! If anything else comes up — pricing, a nervous pet, or picking a time — I am here.",
+                    "social");
+        }
+
+        if (IsGoodbyeMessage(normalized))
+        {
+            return new ChatResponseDto(
+                "Take care — hope to see you and your pet soon. You can pop back into chat anytime.",
+                "social");
+        }
+
+        if (IsHowAreYouMessage(normalized))
+        {
+            return new ChatResponseDto(
+                "I am doing great, thanks for asking — and I am here to make things easy. " +
+                "Would you like the service menu, a quick price check, open times on a date, or help starting a booking?",
+                "social");
+        }
+
+        if (IsCasualGreetingMessage(normalized))
+        {
+            return new ChatResponseDto(
+                "Hi there — lovely to meet you. I can show our grooming menu and prices, check availability on your date, or guide you through a booking step by step.\n\n" +
+                "What would you like to do first?",
+                "greeting");
+        }
+
+        return null;
+    }
+
+    private static bool IsThanksMessage(string normalized)
+    {
+        if (normalized.Length > 120)
+        {
+            return false;
+        }
+
+        return normalized.Contains("thank you", StringComparison.Ordinal) ||
+               normalized.Contains("thanks", StringComparison.Ordinal) ||
+               normalized.Contains("cheers", StringComparison.Ordinal) ||
+               normalized.Contains("much appreciated", StringComparison.Ordinal) ||
+               normalized.Contains("thx", StringComparison.Ordinal) ||
+               normalized.Trim() is "ty" ||
+               normalized.Contains("谢谢", StringComparison.Ordinal);
+    }
+
+    private static bool IsGoodbyeMessage(string normalized)
+    {
+        if (normalized.Length > 80)
+        {
+            return false;
+        }
+
+        var t = normalized.Trim();
+        return t is "bye" or "goodbye" or "see you" or "cya" or "ttyl" ||
+               t.StartsWith("bye ", StringComparison.Ordinal) ||
+               normalized.Contains("see you later", StringComparison.Ordinal) ||
+               normalized.Contains("have a good day", StringComparison.Ordinal) ||
+               normalized.Contains("have a great day", StringComparison.Ordinal) ||
+               normalized.Contains("再见", StringComparison.Ordinal);
+    }
+
+    private static bool IsHowAreYouMessage(string normalized)
+    {
+        if (normalized.Length > 88)
+        {
+            return false;
+        }
+
+        return normalized.Contains("how are you", StringComparison.Ordinal) ||
+               normalized.Contains("how're you", StringComparison.Ordinal) ||
+               normalized.Contains("how r u", StringComparison.Ordinal) ||
+               normalized.Contains("hows it going", StringComparison.Ordinal) ||
+               normalized.Contains("how's it going", StringComparison.Ordinal) ||
+               normalized.Trim() is "what's up" or "whats up" or "sup" ||
+               normalized.StartsWith("how have you been", StringComparison.Ordinal);
+    }
+
+    private static bool IsCasualGreetingMessage(string normalized)
+    {
+        var t = normalized.Trim();
+        if (t.Length == 0 || t.Length > 52)
+        {
+            return false;
+        }
+
+        return t is "hi" or "hello" or "hey" or "hiya" or "yo" or "heya" or "good morning" or "good afternoon" or
+               "good evening" or "morning" or "afternoon" or "evening" or "你好" or "您好" or "hi there" or "hey there" or
+               "hello there";
     }
 
     private static ConversationStage DetectStage(string normalized, string intent, bool bookingInProgress)
@@ -708,7 +904,9 @@ public sealed class ChatOrchestratorService(
 
         if (stage == ConversationStage.asking_about_service)
         {
-            if (IsGroomingNeedStatement(normalized) && services.Any(s => s.Name.Equals("Bath & Tidy", StringComparison.OrdinalIgnoreCase)))
+            if (IsGroomingNeedStatement(normalized) &&
+                !HasExplicitBookingVerb(normalized) &&
+                services.Any(s => s.Name.Equals("Bath & Tidy", StringComparison.OrdinalIgnoreCase)))
             {
                 var bath = services.First(s => s.Name.Equals("Bath & Tidy", StringComparison.OrdinalIgnoreCase));
                 memory.LastServiceName = bath.Name;
@@ -854,17 +1052,52 @@ public sealed class ChatOrchestratorService(
         || normalized.Contains("service")
         || normalized.Contains("include");
 
-    private static bool IsGroomingNeedStatement(string normalized) =>
-        normalized.Contains("clean my")
-        || normalized.Contains("groom my")
-        || normalized.Contains("wash")
-        || normalized.Contains("洗")
-        || normalized.Contains("smells bad")
-        || normalized.Contains("something quick")
-        || normalized.Contains("just wash")
-        || normalized.Contains("not too fancy")
-        || normalized.Contains("just basic")
-        || normalized.Contains("something simple");
+    /// <summary>
+    /// Vague "needs a wash" — not a named menu item like "Wash &amp; Tidy" (substring "wash" would false-positive there).
+    /// </summary>
+    private static bool LooksLikeNamedServiceInMessage(string normalized) =>
+        normalized.Contains("wash & tidy", StringComparison.OrdinalIgnoreCase) ||
+        normalized.Contains("bath & tidy", StringComparison.OrdinalIgnoreCase) ||
+        normalized.Contains("wash&tidy", StringComparison.OrdinalIgnoreCase) ||
+        normalized.Contains("bath&tidy", StringComparison.OrdinalIgnoreCase) ||
+        normalized.Contains("full groom", StringComparison.OrdinalIgnoreCase);
+
+    private static bool HasExplicitBookingVerb(string normalized) =>
+        normalized.Contains("book", StringComparison.OrdinalIgnoreCase) ||
+        normalized.Contains("reserve", StringComparison.OrdinalIgnoreCase) ||
+        normalized.Contains("appointment", StringComparison.OrdinalIgnoreCase) ||
+        normalized.Contains("schedule", StringComparison.OrdinalIgnoreCase) ||
+        normalized.Contains("预约", StringComparison.OrdinalIgnoreCase) ||
+        normalized.Contains("预定", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsShortBookingAffirmation(string normalized)
+    {
+        var t = normalized.Trim().TrimEnd('.', '!', '?').Trim();
+        return t is "yes" or "yeah" or "yep" or "sure" or "ok" or "okay" or "yup" or "ya";
+    }
+
+    private static bool IsGroomingNeedStatement(string normalized)
+    {
+        if (LooksLikeNamedServiceInMessage(normalized))
+        {
+            return false;
+        }
+
+        return normalized.Contains("clean my", StringComparison.OrdinalIgnoreCase)
+               || normalized.Contains("groom my", StringComparison.OrdinalIgnoreCase)
+               || normalized.Contains("wash my", StringComparison.OrdinalIgnoreCase)
+               || normalized.Contains("wash the", StringComparison.OrdinalIgnoreCase)
+               || normalized.Contains("need a wash", StringComparison.OrdinalIgnoreCase)
+               || normalized.Contains("needs a wash", StringComparison.OrdinalIgnoreCase)
+               || normalized.Contains("need to wash", StringComparison.OrdinalIgnoreCase)
+               || normalized.Contains("洗", StringComparison.OrdinalIgnoreCase)
+               || normalized.Contains("smells bad", StringComparison.OrdinalIgnoreCase)
+               || normalized.Contains("something quick", StringComparison.OrdinalIgnoreCase)
+               || normalized.Contains("just wash", StringComparison.OrdinalIgnoreCase)
+               || normalized.Contains("not too fancy", StringComparison.OrdinalIgnoreCase)
+               || normalized.Contains("just basic", StringComparison.OrdinalIgnoreCase)
+               || normalized.Contains("something simple", StringComparison.OrdinalIgnoreCase);
+    }
 
     private static string BuildServiceFact(Service service)
     {
@@ -1125,9 +1358,9 @@ public sealed class ChatOrchestratorService(
             if (missingAvailability.Count > 0)
             {
                 return new ChatResponseDto(
-                    "Sure, I can help check availability. I just need:\n• " +
+                    "Happy to check the calendar for you. I just need:\n• " +
                     string.Join("\n• ", missingAvailability) +
-                    "\nShare those details and I will check the available slots for you.",
+                    "\nYou can send both in one line (for example: Bath & Tidy on 2026-04-10).",
                     "availability");
             }
 
@@ -1143,36 +1376,49 @@ public sealed class ChatOrchestratorService(
         var missing = new List<string>();
         if (string.IsNullOrWhiteSpace(draft.ServiceName)) missing.Add("service name");
         if (string.IsNullOrWhiteSpace(draft.Date)) missing.Add("date (YYYY-MM-DD)");
-        if (string.IsNullOrWhiteSpace(draft.CustomerName)) missing.Add("your name");
         if (string.IsNullOrWhiteSpace(draft.Phone)) missing.Add("phone number");
         if (string.IsNullOrWhiteSpace(draft.PetName)) missing.Add("pet name");
 
+        if (missing.Count == 0 && string.IsNullOrWhiteSpace(draft.StartTime))
+        {
+            SyncBookingSlotOfferContext(draft, memory);
+            var timeReply = await TryBuildBookingTimeSelectionReplyAsync(
+                draft,
+                message,
+                normalized,
+                memory,
+                cancellationToken);
+            if (timeReply is not null)
+            {
+                return timeReply;
+            }
+        }
+
         if (missing.Count == 0)
         {
-            var synthesized = BuildBookingSynthesis(draft);
-            var follow = await geminiChat.ReplyWithGeminiAndToolsAsync(synthesized, sessionKey, cancellationToken);
-            if (!string.IsNullOrWhiteSpace(follow?.Reply))
-            {
-                return follow;
-            }
-
-            return new ChatResponseDto(
-                "Perfect, I have everything I need. Please tell me if you want me to proceed with this booking.",
-                "booking");
+            var payload = new BookingConfirmationPayload(
+                draft.ServiceName!.Trim(),
+                draft.Date!.Trim(),
+                string.IsNullOrWhiteSpace(draft.StartTime) ? null : draft.StartTime.Trim(),
+                CustomerNameNormalizer.Normalize(draft.CustomerName),
+                draft.Phone!.Trim(),
+                draft.PetName!.Trim(),
+                string.IsNullOrWhiteSpace(draft.PetType) ? null : draft.PetType.Trim());
+            return BookingConfirmationFormatter.ToResponse(payload);
         }
 
         if (normalized.Contains("just book it") || normalized.Contains("why so many questions"))
         {
             return new ChatResponseDto(
-                "I can book it right away. I only still need the missing basics so the appointment is valid:\n• " +
+                "I would love to lock this in for you — I only need these so we can confirm the right slot and contact you if anything changes:\n• " +
                 string.Join("\n• ", missing),
                 "booking");
         }
 
         return new ChatResponseDto(
-            "Great, I can set this up for you. I still need:\n• " +
+            "Lovely — we are almost there. To set up the appointment I still need:\n• " +
             string.Join("\n• ", missing) +
-            "\nOnce you share these, I will prepare your confirmation right away.",
+            "\nTip: you can paste everything in one message (service, date, your name, phone, pet name, dog or cat).",
             "booking");
     }
 
@@ -1216,24 +1462,200 @@ public sealed class ChatOrchestratorService(
             "availability");
     }
 
-    private static IReadOnlyList<TimeOnly> FilterPreferredSlots(IReadOnlyList<TimeOnly> slots, string normalized)
+    private static IReadOnlyList<TimeOnly> FilterPreferredSlots(IReadOnlyList<TimeOnly> slots, string normalized) =>
+        FilterSlotsByDayPreference(slots, normalized);
+
+    /// <summary>
+    /// 上午/下午/晚上/早上 + 中午；用于查空位与预约选时。
+    /// </summary>
+    private static IReadOnlyList<TimeOnly> FilterSlotsByDayPreference(IReadOnlyList<TimeOnly> slots, string normalized)
     {
-        if (normalized.Contains("morning") || normalized.Contains("上午"))
+        if (normalized.Contains("evening", StringComparison.OrdinalIgnoreCase) ||
+            normalized.Contains("night", StringComparison.OrdinalIgnoreCase) ||
+            normalized.Contains("晚上", StringComparison.Ordinal))
         {
-            return slots.Where(x => x < new TimeOnly(12, 0)).ToList();
+            return slots.Where(x => x >= new TimeOnly(17, 0) && x <= new TimeOnly(21, 30)).ToList();
         }
 
-        if (normalized.Contains("afternoon") || normalized.Contains("下午"))
+        if (normalized.Contains("afternoon", StringComparison.OrdinalIgnoreCase) ||
+            normalized.Contains("下午", StringComparison.Ordinal))
         {
             return slots.Where(x => x >= new TimeOnly(12, 0) && x < new TimeOnly(18, 0)).ToList();
         }
 
-        if (normalized.Contains("noon") || normalized.Contains("中午") || normalized.Contains("lunchtime"))
+        if (normalized.Contains("noon", StringComparison.OrdinalIgnoreCase) ||
+            normalized.Contains("中午", StringComparison.Ordinal) ||
+            normalized.Contains("lunchtime", StringComparison.OrdinalIgnoreCase))
         {
             return slots.Where(x => x >= new TimeOnly(11, 0) && x <= new TimeOnly(14, 0)).ToList();
         }
 
+        if (normalized.Contains("早上", StringComparison.Ordinal) &&
+            !normalized.Contains("早上好", StringComparison.Ordinal))
+        {
+            return slots.Where(x => x >= new TimeOnly(7, 0) && x < new TimeOnly(11, 0)).ToList();
+        }
+
+        if (normalized.Contains("morning", StringComparison.OrdinalIgnoreCase) ||
+            normalized.Contains("上午", StringComparison.Ordinal))
+        {
+            return slots.Where(x => x < new TimeOnly(12, 0)).ToList();
+        }
+
         return slots;
+    }
+
+    private static bool IsEarlierTimeRequest(string normalized)
+    {
+        if (Regex.IsMatch(normalized, @"\b(?:a\s+)?(?:bit\s+)?earlier\b", RegexOptions.IgnoreCase) ||
+            Regex.IsMatch(normalized, @"\bsooner\b", RegexOptions.IgnoreCase))
+        {
+            return true;
+        }
+
+        return normalized.Contains("早一点", StringComparison.Ordinal) ||
+               normalized.Contains("再早", StringComparison.Ordinal) ||
+               normalized.Contains("往前", StringComparison.Ordinal) ||
+               (normalized.Contains("早点", StringComparison.Ordinal) && !normalized.Contains("早上好", StringComparison.Ordinal));
+    }
+
+    private static bool IsLaterTimeRequest(string normalized)
+    {
+        if (Regex.IsMatch(normalized, @"\b(?:a\s+)?(?:bit\s+)?later\b", RegexOptions.IgnoreCase))
+        {
+            return true;
+        }
+
+        return normalized.Contains("晚一点", StringComparison.Ordinal) ||
+               normalized.Contains("再晚", StringComparison.Ordinal) ||
+               normalized.Contains("往后", StringComparison.Ordinal) ||
+               (normalized.Contains("晚点", StringComparison.Ordinal) && !normalized.Contains("晚点了吗", StringComparison.Ordinal));
+    }
+
+    private static void SyncBookingSlotOfferContext(BookingDraft draft, ConversationMemory memory)
+    {
+        if (!string.Equals(memory.LastBookingSlotContextDate, draft.Date, StringComparison.Ordinal) ||
+            !string.Equals(memory.LastBookingSlotContextService, draft.ServiceName, StringComparison.OrdinalIgnoreCase))
+        {
+            memory.LastOfferedBookingSlots.Clear();
+        }
+
+        memory.LastBookingSlotContextDate = draft.Date;
+        memory.LastBookingSlotContextService = draft.ServiceName;
+    }
+
+    private async Task<(bool serviceResolved, IReadOnlyList<TimeOnly> slots)> TryResolveAvailableSlotStartsAsync(
+        string serviceName,
+        string dateText,
+        CancellationToken cancellationToken)
+    {
+        if (!DateOnly.TryParse(dateText, out var date))
+        {
+            return (false, Array.Empty<TimeOnly>());
+        }
+
+        var services = await bookingService.GetServicesAsync(cancellationToken);
+        var service = services.FirstOrDefault(s => s.Name.Equals(serviceName, StringComparison.OrdinalIgnoreCase))
+                      ?? services.FirstOrDefault(s => serviceName.Contains(s.Name, StringComparison.OrdinalIgnoreCase));
+        if (service is null)
+        {
+            return (false, Array.Empty<TimeOnly>());
+        }
+
+        var availability = await bookingService.GetAvailabilityAsync(service.Id, date, cancellationToken);
+        var list = availability.Slots
+            .Where(s => s.IsAvailable)
+            .Select(s => s.StartTime)
+            .OrderBy(t => t)
+            .ToList();
+        return (true, list);
+    }
+
+    private async Task<ChatResponseDto?> TryBuildBookingTimeSelectionReplyAsync(
+        BookingDraft draft,
+        string message,
+        string normalized,
+        ConversationMemory memory,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(draft.ServiceName) || string.IsNullOrWhiteSpace(draft.Date))
+        {
+            return null;
+        }
+
+        var (resolved, allSlots) = await TryResolveAvailableSlotStartsAsync(draft.ServiceName!, draft.Date!, cancellationToken);
+        if (!resolved)
+        {
+            return new ChatResponseDto(
+                "I could not match that service on our calendar. Say **menu** for service names, then we can pick a time.",
+                "booking");
+        }
+
+        if (allSlots.Count == 0)
+        {
+            return new ChatResponseDto(
+                $"I checked **{draft.ServiceName}** on **{draft.Date}** and there are no open start times left. Want to try another date?",
+                "booking");
+        }
+
+        IReadOnlyList<TimeOnly> pool = allSlots;
+        var offered = memory.LastOfferedBookingSlots;
+
+        if (IsEarlierTimeRequest(normalized) && offered.Count > 0)
+        {
+            var minOffered = offered.Min();
+            pool = allSlots.Where(s => s < minOffered).OrderBy(s => s).ToList();
+            if (pool.Count == 0)
+            {
+                return new ChatResponseDto(
+                    $"There is nothing available **earlier** than **{minOffered:HH:mm}** on that day. " +
+                    $"The earliest opening I still have is **{allSlots.Min():HH:mm}**. " +
+                    "You can pick a time from the list, or say **later** for options after what I last showed.",
+                    "booking");
+            }
+        }
+        else if (IsLaterTimeRequest(normalized) && offered.Count > 0)
+        {
+            var maxOffered = offered.Max();
+            pool = allSlots.Where(s => s > maxOffered).OrderBy(s => s).ToList();
+            if (pool.Count == 0)
+            {
+                return new ChatResponseDto(
+                    $"There is nothing available **after** **{maxOffered:HH:mm}** on that day. " +
+                    $"The latest I still have is **{allSlots.Max():HH:mm}**. " +
+                    "Say **earlier** if you want to see times before what I last suggested.",
+                    "booking");
+            }
+        }
+        else
+        {
+            var preferred = FilterSlotsByDayPreference(allSlots, normalized);
+            if (preferred.Count > 0)
+            {
+                pool = preferred;
+            }
+        }
+
+        var display = pool.Take(6).ToList();
+        if (display.Count == 0)
+        {
+            display = allSlots.Take(6).ToList();
+            memory.LastOfferedBookingSlots = display;
+            var times = string.Join(", ", display.Select(t => t.ToString("HH:mm")));
+            return new ChatResponseDto(
+                "I could not match that time-of-day to open slots, so here are the next available starts on your date:\n" +
+                $"{times}\n\n" +
+                "Reply with one time (for example **10:30**), or say **morning**, **afternoon**, **evening**, or **earlier** / **later** compared to this list.",
+                "booking");
+        }
+
+        memory.LastOfferedBookingSlots = display;
+        var line = string.Join(", ", display.Select(t => t.ToString("HH:mm")));
+        return new ChatResponseDto(
+            $"Here are times that work for **{draft.ServiceName}** on **{draft.Date}**:\n**{line}**\n\n" +
+            "Reply with the time you want (for example **10:30**), or say **morning**, **afternoon**, **evening**, " +
+            "or **earlier** / **later** to shift from this list.",
+            "booking");
     }
 
     private static string? ParseDate(string normalized)
@@ -1255,6 +1677,25 @@ public sealed class ChatOrchestratorService(
             try
             {
                 return new DateOnly(y, mo, d).ToString("yyyy-MM-dd");
+            }
+            catch
+            {
+                // invalid calendar date
+            }
+        }
+
+        var slashYy = TwoDigitYearDateRegex.Match(normalized);
+        if (slashYy.Success &&
+            int.TryParse(slashYy.Groups[1].Value, out var yy) &&
+            int.TryParse(slashYy.Groups[2].Value, out var mo2) &&
+            int.TryParse(slashYy.Groups[3].Value, out var d2) &&
+            mo2 is >= 1 and <= 12 &&
+            d2 is >= 1 and <= 31)
+        {
+            var yFull = yy < 100 ? 2000 + yy : yy;
+            try
+            {
+                return new DateOnly(yFull, mo2, d2).ToString("yyyy-MM-dd");
             }
             catch
             {
@@ -1673,14 +2114,6 @@ public sealed class ChatOrchestratorService(
         }
     }
 
-    private static string BuildBookingSynthesis(BookingDraft draft)
-    {
-        var timePart = string.IsNullOrWhiteSpace(draft.StartTime) ? string.Empty : $" at {draft.StartTime}";
-        var petTypePart = string.IsNullOrWhiteSpace(draft.PetType) ? "pet" : draft.PetType!;
-        return $"Book {draft.ServiceName} on {draft.Date}{timePart} for my {petTypePart}. " +
-               $"My name is {draft.CustomerName}, phone is {draft.Phone}, pet name is {draft.PetName}.";
-    }
-
     private static string NormalizePhone(string phoneRaw)
     {
         var digits = new string(phoneRaw.Where(char.IsDigit).ToArray());
@@ -1705,5 +2138,9 @@ public sealed class ChatOrchestratorService(
         public string? LastServiceName { get; set; }
         public string? LastRecommendedService { get; set; }
         public string LastUserProfile { get; set; } = string.Empty;
+        /// <summary>最近一轮推荐给顾客的预约开始时间（用于「早一点 / 晚一点」）。</summary>
+        public List<TimeOnly> LastOfferedBookingSlots { get; set; } = new();
+        public string? LastBookingSlotContextDate { get; set; }
+        public string? LastBookingSlotContextService { get; set; }
     }
 }

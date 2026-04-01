@@ -39,7 +39,11 @@ public sealed class BookingConfiguration : IEntityTypeConfiguration<Booking>
             .HasForeignKey(x => x.PetId)
             .OnDelete(DeleteBehavior.Restrict);
 
-        builder.HasIndex(x => new { x.BookingDate, x.StartTime });
+        // One active booking per calendar start time (single capacity); cancelled rows excluded.
+        builder.HasIndex(x => new { x.BookingDate, x.StartTime })
+            .IsUnique()
+            .HasFilter("\"Status\" <> 2");
+
         builder.HasIndex(x => x.Status);
         builder.HasIndex(x => x.CustomerId);
         builder.HasIndex(x => x.PetId);

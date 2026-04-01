@@ -7,7 +7,7 @@ public sealed record BookingDto(
     Guid ServiceId,
     string ServiceName,
     Guid CustomerId,
-    string CustomerName,
+    string? CustomerName,
     string CustomerPhone,
     Guid PetId,
     string PetName,

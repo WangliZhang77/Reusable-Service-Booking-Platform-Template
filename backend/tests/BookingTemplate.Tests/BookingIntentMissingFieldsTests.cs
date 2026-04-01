@@ -12,7 +12,7 @@ public sealed class BookingIntentMissingFieldsTests
         var dto = new BookingIntentExtractionDto { Intent = "booking" };
         var missing = BookingIntentMissingFields.Compute(dto);
         Assert.Equal(
-            ["serviceName", "date", "customerName", "phone", "petName"],
+            ["serviceName", "date", "phone", "petName"],
             missing);
     }
 

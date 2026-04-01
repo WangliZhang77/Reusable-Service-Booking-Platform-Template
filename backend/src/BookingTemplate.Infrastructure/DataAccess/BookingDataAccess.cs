@@ -1,3 +1,4 @@
+using System.Data;
 using BookingTemplate.Application.Interfaces.DataAccess;
 using BookingTemplate.Domain.Entities;
 using BookingTemplate.Infrastructure.Persistence;
@@ -121,5 +122,23 @@ public sealed class BookingDataAccess(AppDbContext dbContext) : IBookingDataAcce
     public Task SaveChangesAsync(CancellationToken cancellationToken)
     {
         return dbContext.SaveChangesAsync(cancellationToken);
+    }
+
+    public async Task<T> ExecuteInSerializableTransactionAsync<T>(
+        Func<CancellationToken, Task<T>> action,
+        CancellationToken cancellationToken)
+    {
+        await using var tx = await dbContext.Database.BeginTransactionAsync(IsolationLevel.Serializable, cancellationToken);
+        try
+        {
+            var result = await action(cancellationToken);
+            await tx.CommitAsync(cancellationToken);
+            return result;
+        }
+        catch
+        {
+            await tx.RollbackAsync(cancellationToken);
+            throw;
+        }
     }
 }

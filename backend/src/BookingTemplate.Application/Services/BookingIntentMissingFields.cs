@@ -38,11 +38,6 @@ public static class BookingIntentMissingFields
                     list.Add("date");
                 }
 
-                if (string.IsNullOrWhiteSpace(x.CustomerName))
-                {
-                    list.Add("customerName");
-                }
-
                 if (string.IsNullOrWhiteSpace(x.Phone))
                 {
                     list.Add("phone");

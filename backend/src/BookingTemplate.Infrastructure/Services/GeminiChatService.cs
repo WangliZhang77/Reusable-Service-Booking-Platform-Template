@@ -85,16 +85,14 @@ public sealed class GeminiChatService(
 
                 if (intentNorm == "booking" && missing.Count == 0)
                 {
-                    return new ChatResponseDto(
-                        BuildBookingConfirmationPrompt(new PendingBooking(
-                            extracted.ServiceName!,
-                            extracted.Date!,
-                            extracted.StartTime,
-                            extracted.CustomerName!,
-                            extracted.Phone!,
-                            extracted.PetName!,
-                            extracted.PetType)),
-                        "booking_confirmation");
+                    return BookingConfirmationFormatter.ToResponse(new BookingConfirmationPayload(
+                        extracted.ServiceName!,
+                        extracted.Date!,
+                        extracted.StartTime,
+                        CustomerNameNormalizer.Normalize(extracted.CustomerName),
+                        extracted.Phone!,
+                        extracted.PetName!,
+                        extracted.PetType));
                 }
 
                 if (intentNorm == "price" && missing.Count == 0)
@@ -171,11 +169,13 @@ public sealed class GeminiChatService(
                 Parts =
                 [
                     Part.FromText(
-                        "You are a helpful assistant for a pet grooming / local service booking website. " +
-                        "Use the provided tools when the user asks about pricing, FAQ, availability, or wants to book. " +
-                        "If required parameters are missing, ask a short follow-up question instead of guessing. " +
-                        "For dates and times, output tool arguments as YYYY-MM-DD and HH:mm (24h). " +
-                        "Prefer calling CheckAvailability and CreateBooking when relevant.")
+                        "You are the warm, professional front-desk assistant for a pet grooming salon website. " +
+                        "Sound human: acknowledge feelings (especially nervous pets or first-time visits), use short paragraphs, and avoid robotic lists unless listing times or prices. " +
+                        "Recognize intent: small talk → brief friendly reply then gently offer menu / booking / FAQ; pricing → GetServicePrice; open slots → CheckAvailability; ready to commit with full details → CreateBooking; general questions → SearchFaq. " +
+                        "Never invent services, prices, or policies — use tools for facts. " +
+                        "If parameters are missing, ask one clear follow-up at a time instead of guessing. " +
+                        "Dates and times in tool calls must be YYYY-MM-DD and HH:mm (24-hour). " +
+                        "Prefer tools over long speculation; after tool results, summarize in natural language.")
                 ]
             };
 
@@ -303,16 +303,16 @@ public sealed class GeminiChatService(
         var parts = sorted.Select(Label).ToList();
         var example = intent switch
         {
-            "booking" => "Example: Full Groom, 2026-04-01, Wang Li, 0211234567, Coco",
+            "booking" => "Example: Full Groom, 2026-04-01, 0211234567, Coco (name optional if unsure)",
             "availability" => "Example: Full Groom, 2026-04-01",
             "price" => "Example: Full Groom",
             "faq" => "Example: Do you groom senior cats?",
             _ => string.Empty
         };
 
-        return "I can take care of that. I just need a couple more details:\n• " +
+        return "Happy to help — I just need a bit more so I get it right for you:\n• " +
                string.Join("\n• ", parts) +
-               "\nSend them in one message and I will handle the rest." +
+               "\nYou can send everything in one message if that is easier." +
                (string.IsNullOrWhiteSpace(example) ? string.Empty : $"\n{example}");
     }
 
@@ -360,7 +360,7 @@ public sealed class GeminiChatService(
                 new FunctionDeclaration
                 {
                     Name = "CreateBooking",
-                    Description = "Create a booking after you have service name, date, start time, customer name, phone, pet name, and pet type/species.",
+                    Description = "Create a booking when you have service name, date, start time, phone, pet name, and pet type. Customer name is optional — omit or leave empty if unknown; never use time-of-day words as a name.",
                     ParametersJsonSchema = ParseSchema("""
                     {
                       "type": "object",
@@ -368,12 +368,12 @@ public sealed class GeminiChatService(
                         "serviceName": { "type": "string" },
                         "date": { "type": "string", "description": "YYYY-MM-DD" },
                         "startTime": { "type": "string", "description": "HH:mm 24h" },
-                        "customerName": { "type": "string" },
+                        "customerName": { "type": "string", "description": "Optional. Real person name only; omit if not provided." },
                         "phone": { "type": "string" },
                         "petName": { "type": "string" },
                         "petType": { "type": "string", "description": "Species e.g. dog, cat" }
                       },
-                      "required": ["serviceName", "date", "startTime", "customerName", "phone", "petName", "petType"]
+                      "required": ["serviceName", "date", "startTime", "phone", "petName", "petType"]
                     }
                     """)
                 },
@@ -412,21 +412,7 @@ public sealed class GeminiChatService(
     private static object ParseSchema(string json) =>
         JsonSerializer.Deserialize<object>(json) ?? new { };
 
-    private static string BuildBookingConfirmationPrompt(PendingBooking pending)
-    {
-        var token = Convert.ToBase64String(JsonSerializer.SerializeToUtf8Bytes(pending));
-        return $"I have prepared your booking details:\n" +
-               $"Service: {pending.ServiceName}\n" +
-               $"Date: {pending.Date}\n" +
-               $"Time: {(string.IsNullOrWhiteSpace(pending.StartTime) ? "We will assign the nearest available slot." : pending.StartTime)}\n" +
-               $"Pet: {pending.PetName}{(string.IsNullOrWhiteSpace(pending.PetType) ? string.Empty : $" ({pending.PetType})")}\n" +
-               $"Customer: {pending.CustomerName}\n" +
-               $"Phone: {pending.Phone}\n\n" +
-               "If everything looks good, reply exactly:\n" +
-               $"Yes, confirm {token}";
-    }
-
-    private static bool TryParseConfirmation(string message, out PendingBooking pending)
+    private static bool TryParseConfirmation(string message, out BookingConfirmationPayload pending)
     {
         pending = default!;
         var match = BookingConfirmationRegex.Match(message.Trim());
@@ -444,11 +430,10 @@ public sealed class GeminiChatService(
         try
         {
             var json = Convert.FromBase64String(token);
-            var parsed = JsonSerializer.Deserialize<PendingBooking>(json);
+            var parsed = JsonSerializer.Deserialize<BookingConfirmationPayload>(json);
             if (parsed is null ||
                 string.IsNullOrWhiteSpace(parsed.ServiceName) ||
                 string.IsNullOrWhiteSpace(parsed.Date) ||
-                string.IsNullOrWhiteSpace(parsed.CustomerName) ||
                 string.IsNullOrWhiteSpace(parsed.Phone) ||
                 string.IsNullOrWhiteSpace(parsed.PetName))
             {
@@ -463,15 +448,6 @@ public sealed class GeminiChatService(
             return false;
         }
     }
-
-    private sealed record PendingBooking(
-        string ServiceName,
-        string Date,
-        string? StartTime,
-        string CustomerName,
-        string Phone,
-        string PetName,
-        string? PetType);
 
     private static bool TryHandleSlotFollowUp(string message, string sessionKey, out ChatResponseDto reply)
     {

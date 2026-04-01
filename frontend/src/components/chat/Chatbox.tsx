@@ -7,7 +7,7 @@ type ChatMessage = {
   role: 'user' | 'assistant'
   text: string
   intent?: string
-  /** 已点击「确认预约」并成功提交，避免重复写入 admin */
+  /** After Confirm booking succeeds, hide duplicate submit */
   confirmConsumed?: boolean
 }
 
@@ -27,6 +27,19 @@ function newId() {
 
 function isBookingConfirmationIntent(intent: string | undefined) {
   return (intent ?? '').toLowerCase() === 'booking_confirmation'
+}
+
+/** Hide long base64 in UI; full text stays in state for the confirm button payload. */
+function displayAssistantBody(text: string, intent: string | undefined): string {
+  if (!isBookingConfirmationIntent(intent)) return text
+  return text.replace(
+    CONFIRM_LINE_RE,
+    'Use the Confirm booking button below to save this appointment — you do not need to copy any code.'
+  )
+}
+
+function displayUserBody(text: string): string {
+  return extractConfirmationPayload(text) !== null ? 'Confirm booking' : text
 }
 
 function Chatbox() {
@@ -50,7 +63,7 @@ function Chatbox() {
     {
       id: 'intro',
       role: 'assistant',
-      text: 'Hi! Ask me about FAQ, pricing, availability, or booking.',
+      text: 'Hi — I can help you explore services, compare options, check prices and open times, or walk through a booking. What brings you in today?',
     },
   ])
 
@@ -88,7 +101,7 @@ function Chatbox() {
     }
   }
 
-  /** 仅通过按钮提交：写入数据库 / admin 列表在此步发生 */
+  /** Button sends the real Yes, confirm <token> line to the API */
   const sendConfirmation = async (assistantId: string, payload: string) => {
     setMessages((prev) => [...prev, { id: newId(), role: 'user', text: payload }])
     setSending(true)
@@ -140,7 +153,9 @@ function Chatbox() {
 
               return (
                 <div key={msg.id} className={`chat-message ${msg.role}`}>
-                  <div className="chat-message-body">{msg.text}</div>
+                  <div className="chat-message-body">
+                    {msg.role === 'user' ? displayUserBody(msg.text) : displayAssistantBody(msg.text, msg.intent)}
+                  </div>
                   {tokenPayload ? (
                     <button
                       type="button"
@@ -148,7 +163,7 @@ function Chatbox() {
                       disabled={sending}
                       onClick={() => void sendConfirmation(msg.id, tokenPayload)}
                     >
-                      确认预约（提交到后台）
+                      Confirm booking
                     </button>
                   ) : null}
                 </div>
@@ -157,7 +172,8 @@ function Chatbox() {
           </div>
           {pendingBookingConfirm ? (
             <p className="chatbox-pending-hint">
-              信息已齐全。请点击上一条消息里的「确认预约」后，预约才会出现在管理后台；仅发送文字不会完成提交。
+              Your details look complete. Tap <strong>Confirm booking</strong> on the message above to save it to the
+              admin schedule — typing a normal message alone will not finalize the appointment.
             </p>
           ) : null}
           <form className="chatbox-input" onSubmit={onSubmit}>

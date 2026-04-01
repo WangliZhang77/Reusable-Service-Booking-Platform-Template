@@ -40,10 +40,16 @@ public sealed class BookingService(IBookingDataAccess dataAccess) : IBookingServ
         return new AvailabilityResponseDto(service.Id, date, slots);
     }
 
-    public async Task<BookingDto> CreateBookingAsync(CreateBookingRequestDto request, CancellationToken cancellationToken)
+    public Task<BookingDto> CreateBookingAsync(CreateBookingRequestDto request, CancellationToken cancellationToken)
     {
         ValidateCreateBookingRequest(request);
+        return dataAccess.ExecuteInSerializableTransactionAsync(
+            ct => CreateBookingCoreAsync(request, ct),
+            cancellationToken);
+    }
 
+    private async Task<BookingDto> CreateBookingCoreAsync(CreateBookingRequestDto request, CancellationToken cancellationToken)
+    {
         var service = await dataAccess.GetActiveServiceByIdAsync(request.ServiceId, cancellationToken)
             ?? throw new KeyNotFoundException("Selected service does not exist.");
 
@@ -55,14 +61,14 @@ public sealed class BookingService(IBookingDataAccess dataAccess) : IBookingServ
         ValidateSlotInsideBusinessHours(businessHour, start, end);
         ValidateSlotAlignment(businessHour, start);
 
+        var customer = await UpsertCustomerAsync(request.Customer, cancellationToken);
+        var pet = await UpsertPetAsync(customer.Id, request.Pet, cancellationToken);
+
         var existingBookings = await GetActiveBookingsByDateAsync(request.BookingDate, cancellationToken);
         if (HasOverlap(existingBookings, start, end))
         {
             throw new InvalidOperationException("The selected time slot is no longer available.");
         }
-
-        var customer = await UpsertCustomerAsync(request.Customer, cancellationToken);
-        var pet = await UpsertPetAsync(customer.Id, request.Pet, cancellationToken);
 
         var booking = new Booking
         {
@@ -80,9 +86,31 @@ public sealed class BookingService(IBookingDataAccess dataAccess) : IBookingServ
         };
 
         await dataAccess.AddBookingAsync(booking, cancellationToken);
-        await dataAccess.SaveChangesAsync(cancellationToken);
+        try
+        {
+            await dataAccess.SaveChangesAsync(cancellationToken);
+        }
+        catch (Exception ex) when (IsDatabaseUniqueOrConcurrencyConflict(ex))
+        {
+            throw new InvalidOperationException(
+                "That start time is already taken for this day. Please choose another slot from availability.");
+        }
 
         return MapBookingDto(booking, service.Name, customer.FullName, customer.Phone, pet.Name);
+    }
+
+    private static bool IsDatabaseUniqueOrConcurrencyConflict(Exception ex)
+    {
+        for (var e = ex; e is not null; e = e.InnerException)
+        {
+            if (e.Message.Contains("UNIQUE constraint", StringComparison.OrdinalIgnoreCase) ||
+                e.Message.Contains("unique constraint", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     public async Task<IReadOnlyList<BookingDto>> GetBookingsAsync(DateOnly? date, CancellationToken cancellationToken)
@@ -144,11 +172,6 @@ public sealed class BookingService(IBookingDataAccess dataAccess) : IBookingServ
         }
 
         ValidateBookingDate(request.BookingDate);
-
-        if (string.IsNullOrWhiteSpace(request.Customer.FullName))
-        {
-            throw new ArgumentException("Customer full name is required.");
-        }
 
         if (string.IsNullOrWhiteSpace(request.Customer.Phone))
         {
@@ -225,11 +248,16 @@ public sealed class BookingService(IBookingDataAccess dataAccess) : IBookingServ
     private async Task<Customer> UpsertCustomerAsync(CustomerInputDto customerInput, CancellationToken cancellationToken)
     {
         var normalizedPhone = customerInput.Phone.Trim();
+        var normalizedName = CustomerNameNormalizer.Normalize(customerInput.FullName);
         var existingCustomer = await dataAccess.GetCustomerByPhoneAsync(normalizedPhone, cancellationToken);
 
         if (existingCustomer is not null)
         {
-            existingCustomer.FullName = customerInput.FullName.Trim();
+            if (normalizedName is not null)
+            {
+                existingCustomer.FullName = normalizedName;
+            }
+
             existingCustomer.Email = Clean(customerInput.Email);
             existingCustomer.UpdatedAt = DateTimeOffset.UtcNow;
             return existingCustomer;
@@ -238,7 +266,7 @@ public sealed class BookingService(IBookingDataAccess dataAccess) : IBookingServ
         var customer = new Customer
         {
             Id = Guid.NewGuid(),
-            FullName = customerInput.FullName.Trim(),
+            FullName = normalizedName,
             Phone = normalizedPhone,
             Email = Clean(customerInput.Email),
             CreatedAt = DateTimeOffset.UtcNow,
@@ -333,7 +361,7 @@ public sealed class BookingService(IBookingDataAccess dataAccess) : IBookingServ
     private static BookingDto MapBookingDto(
         Booking booking,
         string serviceName,
-        string customerName,
+        string? customerName,
         string customerPhone,
         string petName)
     {

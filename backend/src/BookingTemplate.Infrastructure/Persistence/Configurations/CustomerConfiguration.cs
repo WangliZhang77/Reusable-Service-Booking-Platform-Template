@@ -11,7 +11,7 @@ public sealed class CustomerConfiguration : IEntityTypeConfiguration<Customer>
         builder.ToTable("customers");
         builder.HasKey(x => x.Id);
 
-        builder.Property(x => x.FullName).HasMaxLength(120).IsRequired();
+        builder.Property(x => x.FullName).HasMaxLength(120);
         builder.Property(x => x.Phone).HasMaxLength(30).IsRequired();
         builder.Property(x => x.Email).HasMaxLength(180);
         builder.Property(x => x.Notes);

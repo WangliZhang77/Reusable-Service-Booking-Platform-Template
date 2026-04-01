@@ -19,4 +19,9 @@ public interface IBookingDataAccess
     Task AddCustomerAsync(Customer customer, CancellationToken cancellationToken);
     Task AddPetAsync(Pet pet, CancellationToken cancellationToken);
     Task SaveChangesAsync(CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Runs work inside a Serializable DB transaction so concurrent creates cannot both pass overlap checks.
+    /// </summary>
+    Task<T> ExecuteInSerializableTransactionAsync<T>(Func<CancellationToken, Task<T>> action, CancellationToken cancellationToken);
 }

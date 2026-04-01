@@ -35,7 +35,9 @@ function BookingTable({ bookings, updatingBookingId, onUpdateStatus }: BookingTa
               </td>
               <td>{booking.serviceName}</td>
               <td>
-                <div>{booking.customerName ?? '-'}</div>
+                <div className="muted">
+                  {booking.customerName != null && booking.customerName !== '' ? booking.customerName : 'null'}
+                </div>
                 <small className="muted">{booking.customerPhone ?? ''}</small>
               </td>
               <td>{booking.petName ?? '-'}</td>

@@ -583,7 +583,11 @@ h3 {
 }
 
 .chat-message {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
   max-width: 92%;
+  min-width: 0;
   padding: 0.45rem 0.6rem;
   border-radius: 10px;
   border: 1px solid var(--border);
@@ -592,23 +596,32 @@ h3 {
 
 .chat-message.user {
   margin-left: auto;
+  align-items: flex-end;
   background: #e8f4f4;
   border-color: #b8dddd;
 }
 
 .chat-message.assistant {
+  align-items: flex-start;
   background: #fff;
 }
 
 .chat-message-body {
   white-space: pre-wrap;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .chatbox-confirm-btn {
-  margin-top: 0.45rem;
-  width: 100%;
-  font-size: 0.88rem;
-  padding: 0.4rem 0.55rem;
+  flex-shrink: 0;
+  width: auto;
+  max-width: 100%;
+  align-self: flex-start;
+  font-size: 0.85rem;
+  padding: 0.35rem 0.65rem;
+  line-height: 1.25;
 }
 
 .chatbox-pending-hint {
